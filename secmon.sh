@@ -1,97 +1,99 @@
 #!/usr/bin/env bash
-##########################################################
-# secmon-setup — install the script and register shortcuts
+#############################################
+# secmon — Enable/Disable Secondary Monitor #
+#############################################
+# Usage: secmon on | off | toggle | status
 #
-#   ./secmon-setup.sh            -> install + shortcuts
-#   ./secmon-setup.sh --ddc      -> + i2c permissions
-#   ./secmon-setup.sh --uninstall
-##########################################################
+# Get your configuration values from:  xrandr --query  and  ddcutil detect
+
 set -euo pipefail
 
-BIN_DIR="$HOME/.local/bin"
-BIN="$BIN_DIR/secmon"
+# --- monitors ----------------------------------------------------------
+LAPTOP_OUT="eDP-1-1"
+LAPTOP_MODE="2560x1600"
+LAPTOP_RATE="165"
 
-# Local install: 'secmon' must sit next to this script (as it does after
-# a git clone).
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="$SCRIPT_DIR/secmon"
+EXT_OUT="HDMI-0"
+EXT_MODE="3440x1440"
+EXT_RATE="100"
 
-KB=org.gnome.settings-daemon.plugins.media-keys
-BASE=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings
-EN="$BASE/secmon-enable/"
-DIS="$BASE/secmon-disable/"
+# --- DDC/CI (AOC CU34G2XP, VCP 0x60 = input source) --------------------
+# Identify by model rather than "--display 1": the display number shifts
+# depending on detection order at boot.
+DDC_MODEL="CU34G2XP"
+DDC_INPUT_ON="0x11"    # HDMI-1  (this PC)
+DDC_INPUT_OFF="0x12"   # HDMI-2  (other source)
+DDC_WAKE_DELAY="1.5"   # seconds to let the monitor wake after input switch
 
-# --- shortcut list: append without destroying existing entries ---------
-kb_list_add() {
-    local cur; cur=$(gsettings get "$KB" custom-keybindings)
-    [[ "$cur" == "@as []" ]] && cur="[]"
-    local p
-    for p in "$@"; do
-        [[ "$cur" == *"'$p'"* ]] && continue
-        if [[ "$cur" == "[]" ]]; then cur="['$p']"
-        else cur="${cur%]}, '$p']"; fi
-    done
-    gsettings set "$KB" custom-keybindings "$cur"
+# -----------------------------------------------------------------------
+die() { echo "secmon: $*" >&2; exit 1; }
+log() { echo "secmon: $*"; }
+
+EXT_WIDTH="${EXT_MODE%x*}"
+
+check_env() {
+    [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]] && \
+        die "Wayland session detected: xrandr cannot control it. Log in under X11."
+    command -v xrandr >/dev/null || die "xrandr not found."
 }
 
-kb_list_del() {
-    local cur; cur=$(gsettings get "$KB" custom-keybindings)
-    [[ "$cur" == "@as []" ]] && return 0
-    local p
-    for p in "$@"; do
-        cur="${cur//\'$p\', /}"; cur="${cur//, \'$p\'/}"; cur="${cur//\'$p\'/}"
-    done
-    [[ "$cur" == "[]" || "$cur" == "[ ]" ]] && cur="@as []"
-    gsettings set "$KB" custom-keybindings "$cur"
+ddc() {
+    command -v ddcutil >/dev/null || { log "ddcutil missing, skipping input switch."; return 0; }
+    # Do not abort on DDC failure: xrandr should still run.
+    ddcutil --model "$DDC_MODEL" setvcp 60 "$1" 2>/dev/null \
+        || log "warning: failed to switch input over DDC/CI."
 }
 
-install_bin() {
-    [[ -f "$SRC" ]] || {
-        echo "error: '$SRC' not found." >&2
-        echo "Run this script from the cloned repository directory." >&2
-        exit 1
-    }
-    mkdir -p "$BIN_DIR"
-    install -m 755 "$SRC" "$BIN"
-    echo "installed: $BIN"
-    case ":$PATH:" in *":$BIN_DIR:"*) ;; *) echo "warning: $BIN_DIR is not on your PATH";; esac
+ext_connected() {
+    xrandr --query | grep -q "^${EXT_OUT} connected"
 }
 
-install_keys() {
-    kb_list_add "$EN" "$DIS"
-    gsettings set "$KB.custom-keybinding:$EN"  name    'Secondary Monitor Enable'
-    gsettings set "$KB.custom-keybinding:$EN"  command "$BIN on"
-    gsettings set "$KB.custom-keybinding:$EN"  binding '<Super>F11'
-    gsettings set "$KB.custom-keybinding:$DIS" name    'Secondary Monitor Disable'
-    gsettings set "$KB.custom-keybinding:$DIS" command "$BIN off"
-    gsettings set "$KB.custom-keybinding:$DIS" binding '<Super>F12'
-    echo "shortcuts registered: <Super>F11 / <Super>F12"
+ext_active() {
+    # An active output shows its geometry (e.g. 3440x1440+0+0) on its line.
+    xrandr --query | awk -v o="$EXT_OUT" \
+        '$1==o && $0 ~ /[0-9]+x[0-9]+\+[0-9]+\+[0-9]+/ {found=1} END{exit !found}'
 }
 
-setup_ddc() {
-    getent group i2c >/dev/null || sudo groupadd i2c
-    echo 'KERNEL=="i2c-[0-9]*", GROUP="i2c", MODE="0660"' \
-        | sudo tee /etc/udev/rules.d/45-ddcutil-i2c.rules >/dev/null
-    id -nG "$USER" | grep -qw i2c || sudo usermod -aG i2c "$USER"
-    sudo udevadm control --reload-rules
-    sudo udevadm trigger
-    grep -qxF i2c-dev /etc/modules-load.d/i2c-dev.conf 2>/dev/null \
-        || echo i2c-dev | sudo tee /etc/modules-load.d/i2c-dev.conf >/dev/null
-    sudo modprobe i2c-dev
-    echo "i2c configured. Log out and back in for the group change to apply."
+layout_dual() {
+    xrandr \
+        --output "$EXT_OUT"    --mode "$EXT_MODE"    --rate "$EXT_RATE"    --pos 0x0 \
+        --output "$LAPTOP_OUT" --mode "$LAPTOP_MODE" --rate "$LAPTOP_RATE" --pos "${EXT_WIDTH}x0" --primary
 }
 
-uninstall() {
-    kb_list_del "$EN" "$DIS"
-    dconf reset -f "$EN"  2>/dev/null || true
-    dconf reset -f "$DIS" 2>/dev/null || true
-    rm -f "$BIN"
-    echo "uninstalled."
+layout_single() {
+    xrandr \
+        --output "$LAPTOP_OUT" --mode "$LAPTOP_MODE" --rate "$LAPTOP_RATE" --pos 0x0 --primary \
+        --output "$EXT_OUT"    --off
 }
 
-case "${1:-}" in
-    --uninstall) uninstall ;;
-    --ddc)       install_bin; install_keys; setup_ddc ;;
-    "")          install_bin; install_keys ;;
-    *)           echo "usage: $0 [--ddc|--uninstall]" >&2; exit 1 ;;
+cmd_on() {
+    ext_connected || die "'$EXT_OUT' is not connected."
+    ddc "$DDC_INPUT_ON"
+    sleep "$DDC_WAKE_DELAY"          # give the monitor time to sync
+    layout_dual
+    log "secondary monitor enabled."
+}
+
+cmd_off() {
+    layout_single                    # turn the output off first...
+    ddc "$DDC_INPUT_OFF"             # ...then release the input
+    log "secondary monitor disabled."
+}
+
+cmd_toggle() {
+    if ext_active; then cmd_off; else cmd_on; fi
+}
+
+cmd_status() {
+    ext_connected || { echo "disconnected"; return; }
+    ext_active && echo "active" || echo "inactive"
+}
+
+check_env
+case "${1:-toggle}" in
+    on)     cmd_on ;;
+    off)    cmd_off ;;
+    toggle) cmd_toggle ;;
+    status) cmd_status ;;
+    *)      die "usage: $(basename "$0") {on|off|toggle|status}" ;;
 esac
