@@ -23,7 +23,7 @@ EXT_RATE="100"
 DDC_MODEL="CU34G2XP"
 DDC_INPUT_ON="0x12"    # HDMI-1  (this PC)
 DDC_INPUT_OFF="0x11"   # HDMI-2  (other source)
-DDC_WAKE_DELAY="1.5"   # seconds to let the monitor wake after input switch
+DDC_WAKE_DELAY="2"   # seconds to let the monitor wake after input switch
 
 # -----------------------------------------------------------------------
 die() { echo "secmon: $*" >&2; exit 1; }
